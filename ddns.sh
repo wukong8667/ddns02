@@ -1,325 +1,204 @@
 #!/bin/bash
 
-# Cloudflare DDNS 全自动一键部署脚本
-# 固定配置，自动执行，无需手动输入
+# =================== 配置区(首装可不改, 菜单第3项可手动填写) ===================
+CFKEY="9283f23fbac13705d7301e32919609e4f743a"            # Cloudflare Global API Key
+CFUSER="wukong8667@gmail.com"           # Cloudflare账户Email
+CFZONE_NAME="cfcdndns.top"      # 主域名(如：example.com)
+CFRECORD_NAME="hk02.cfcdndns.top"    # 解析子域名(如：ddns.example.com)
+# ===========================================================================
 
-set -e
+CFG="/root/cf-ddns.conf"
+DDNS_SH="/root/cf-v4-ddns.sh"
+CRON_MARK="$DDNS_SH"
+LOGF="/var/log/cf-ddns-manager.log"
 
-# 固定配置信息
-CFKEY="9283f23fbac13705d7301e32919609e4f743a"
-CFUSER="wukong8667@gmail.com"
-CFZONE_NAME="cfcdndns.top"
-CFRECORD_NAME="hk02.cfcdndns.top"
-CRON_INTERVAL="*/1 * * * *"  # 每1分钟更新
+log_green()  { echo -e "\033[1;32m$1\033[0m"; }
+log_red()    { echo -e "\033[1;31m$1\033[0m"; }
+log_blue()   { echo -e "\033[1;36m$1\033[0m"; }
 
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-# 打印带颜色的信息
-print_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
-
-# 显示banner
-show_banner() {
-    clear
-    echo -e "${BLUE}"
-    echo "================================================"
-    echo "     Cloudflare DDNS 全自动部署脚本"
-    echo "================================================"
-    echo -e "${NC}"
-    echo "域名: $CFRECORD_NAME"
-    echo "更新频率: 每1分钟"
-    echo ""
-    sleep 2
-}
-
-# 检查是否为root用户
-check_root() {
-    print_info "检查用户权限..."
-    if [[ $EUID -ne 0 ]]; then
-        print_error "此脚本必须以root权限运行"
-        echo "请使用: sudo $0"
-        exit 1
+load_conf() {
+    # 优先读配置文件
+    if [ -f "$CFG" ]; then
+        source "$CFG"
     fi
-    print_success "权限检查通过"
 }
 
-# 检查系统
-check_system() {
-    print_info "检测操作系统..."
-    if [[ -f /etc/redhat-release ]]; then
-        OS="centos"
-    elif cat /etc/issue | grep -q -E -i "debian"; then
-        OS="debian"
-    elif cat /etc/issue | grep -q -E -i "ubuntu"; then
-        OS="ubuntu"
-    elif cat /etc/issue | grep -q -E -i "centos|red hat|redhat"; then
-        OS="centos"
-    elif cat /proc/version | grep -q -E -i "debian"; then
-        OS="debian"
-    elif cat /proc/version | grep -q -E -i "ubuntu"; then
-        OS="ubuntu"
-    elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
-        OS="centos"
-    else
-        print_error "不支持的操作系统"
-        exit 1
-    fi
-    print_success "系统检测完成: $OS"
+save_conf() {
+    cat <<EOF >$CFG
+CFKEY="$CFKEY"
+CFUSER="$CFUSER"
+CFZONE_NAME="$CFZONE_NAME"
+CFRECORD_NAME="$CFRECORD_NAME"
+EOF
 }
 
-# 安装必要的工具
-install_dependencies() {
-    print_info "安装必要依赖..."
-    if [[ "$OS" == "centos" ]]; then
-        yum install -y wget curl crontabs >/dev/null 2>&1
-        systemctl enable crond >/dev/null 2>&1
-        systemctl start crond >/dev/null 2>&1
-    else
-        apt-get update >/dev/null 2>&1
-        apt-get install -y wget curl cron >/dev/null 2>&1
-        systemctl enable cron >/dev/null 2>&1
-        systemctl start cron >/dev/null 2>&1
-    fi
-    print_success "依赖安装完成"
+apply_config_ddns_sh() {
+    sed -i "s/^CFKEY=.*/CFKEY=\"$CFKEY\"/" "$DDNS_SH"
+    sed -i "s/^CFUSER=.*/CFUSER=\"$CFUSER\"/" "$DDNS_SH"
+    sed -i "s/^CFZONE_NAME=.*/CFZONE_NAME=\"$CFZONE_NAME\"/" "$DDNS_SH"
+    sed -i "s/^CFRECORD_NAME=.*/CFRECORD_NAME=\"$CFRECORD_NAME\"/" "$DDNS_SH"
 }
 
-# 下载并配置脚本
-setup_ddns_script() {
-    print_info "下载DDNS脚本..."
-    
-    # 备份旧脚本（如果存在）
-    if [[ -f /root/cf-v4-ddns.sh ]]; then
-        mv /root/cf-v4-ddns.sh /root/cf-v4-ddns.sh.bak.$(date +%Y%m%d%H%M%S)
-        print_warning "已备份旧脚本"
-    fi
-    
-    # 下载脚本
-    wget -N --no-check-certificate https://raw.githubusercontent.com/yulewang/cloudflare-api-v4-ddns/master/cf-v4-ddns.sh -O /root/cf-v4-ddns.sh >/dev/null 2>&1
-    
-    if [[ ! -f /root/cf-v4-ddns.sh ]]; then
-        print_error "脚本下载失败，尝试备用源..."
-        # 如果下载失败，创建本地脚本
-        create_local_ddns_script
-    else
-        print_success "脚本下载成功"
-    fi
-    
-    # 配置脚本
-    print_info "配置DDNS参数..."
-    sed -i "s/^CFKEY=.*/CFKEY=\"$CFKEY\"/" /root/cf-v4-ddns.sh
-    sed -i "s/^CFUSER=.*/CFUSER=\"$CFUSER\"/" /root/cf-v4-ddns.sh
-    sed -i "s/^CFZONE_NAME=.*/CFZONE_NAME=\"$CFZONE_NAME\"/" /root/cf-v4-ddns.sh
-    sed -i "s/^CFRECORD_NAME=.*/CFRECORD_NAME=\"$CFRECORD_NAME\"/" /root/cf-v4-ddns.sh
-    
-    # 设置执行权限
-    chmod +x /root/cf-v4-ddns.sh
-    print_success "配置完成"
+change_config() {
+    log_blue "请输入Cloudflare 配置信息:"
+    read -rp "全局API KEY                 : " CFKEY
+    read -rp "Email(账户邮箱)               : " CFUSER
+    read -rp "主域名(example.com)           : " CFZONE_NAME
+    read -rp "记录名(完整如ddns.example.com): " CFRECORD_NAME
+    save_conf
+    if [ -f "$DDNS_SH" ]; then apply_config_ddns_sh; fi
+    log_green "配置已保存"
 }
 
-# 创建本地DDNS脚本（备用）
-create_local_ddns_script() {
-    cat > /root/cf-v4-ddns.sh <<'EOF'
-#!/bin/bash
-# Cloudflare API v4 DDNS
+uninstall() {
+    log_blue "正在卸载Cloudflare DDNS..."
+    crontab -l 2>/dev/null | grep -v "$CRON_MARK" | crontab -
+    [ -f "$DDNS_SH" ] && rm -f "$DDNS_SH"
+    [ -f "$CFG" ] && rm -f "$CFG"
+    log_green "卸载完成，crontab及脚本、配置已清理！"
+}
 
-# API key
-CFKEY="9283f23fbac13705d7301e32919609e4f743a"
-# Email
-CFUSER="wukong8667@gmail.com"
-# Zone name
-CFZONE_NAME="cfcdndns.top"
-# Record name
-CFRECORD_NAME="hk01.cfcdndns.top"
+restart_ddns() {
+    load_conf
+    if [ ! -f "$DDNS_SH" ]; then log_red "未安装DDNS脚本"; exit 1; fi
+    bash "$DDNS_SH"
+}
 
-# Get current IP
-IP=$(curl -s http://ipv4.icanhazip.com)
-if [ -z "$IP" ]; then
-    IP=$(curl -s http://ipinfo.io/ip)
+show_menu() {
+    log_green "========= Cloudflare DDNS 管理菜单 ========="
+    echo "1. 卸载"
+    echo "2. 执行一次DDNS同步（立即）"
+    echo "3. 更改 Cloudflare 配置"
+    echo "4. 退出"
+    echo "--------------------------------------"
+    read -rp "请选择操作[1-4]: " act
+    case "$act" in
+        1) uninstall ;;
+        2) restart_ddns ;;
+        3) change_config ; [ -f "$DDNS_SH" ] && apply_config_ddns_sh && log_green "DDNS主脚本配置已同步" ;;
+        4) exit 0 ;;
+        *) log_red "无效选项"; exit 1 ;;
+    esac
+    exit 0
+}
+
+# 进入管理菜单：如已安装过且有参数/配置，就弹出菜单退出
+if [ -f "$DDNS_SH" ] && { [ -f "$CFG" ] || [ -n "$CFKEY" ]; } && [ -z "$1" ]; then
+    load_conf
+    show_menu
 fi
 
-# Get zone ID
-CFZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" \
-  -H "X-Auth-Email: $CFUSER" \
-  -H "X-Auth-Key: $CFKEY" \
-  -H "Content-Type: application/json" | grep -Po '(?<="id":")[^"]*' | head -1)
+# ========== 【以下为首次自动装机流程】 ==========
 
-# Get record ID
-CFRECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME" \
-  -H "X-Auth-Email: $CFUSER" \
-  -H "X-Auth-Key: $CFKEY" \
-  -H "Content-Type: application/json" | grep -Po '(?<="id":")[^"]*' | head -1)
+exec > >(tee -a $LOGF) 2>&1
 
-# Update record
-if [ -n "$CFZONE_ID" ] && [ -n "$CFRECORD_ID" ]; then
-    curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
-      -H "X-Auth-Email: $CFUSER" \
-      -H "X-Auth-Key: $CFKEY" \
-      -H "Content-Type: application/json" \
-      --data "{\"type\":\"A\",\"name\":\"$CFRECORD_NAME\",\"content\":\"$IP\",\"ttl\":120,\"proxied\":false}"
-    echo "$(date): Updated $CFRECORD_NAME to $IP"
+# root检查
+if [ "$EUID" -ne 0 ]; then log_red "请用root账号运行本脚本"; exit 1; fi
+
+# 读取参数
+load_conf
+
+if [ -z "$CFKEY" ] || [ -z "$CFUSER" ] || [ -z "$CFZONE_NAME" ] || [ -z "$CFRECORD_NAME" ]; then
+    log_red "未填写Cloudflare参数，可菜单选择【3】更改配置后再安装！"
+    change_config
+fi
+
+save_conf
+
+log_green "\n【1/7】检测基础依赖中..."
+MISSING=""
+for p in curl wget sed; do command -v $p >/dev/null 2>&1 || MISSING="$MISSING $p"; done
+
+CRONSVC=""
+if command -v crond >/dev/null 2>&1; then
+    CRONSVC=crond
+elif command -v cron >/dev/null 2>&1; then
+    CRONSVC=cron
+elif command -v apt >/dev/null 2>&1; then
+    MISSING="$MISSING cron"
+elif command -v yum >/dev/null 2>&1; then
+    MISSING="$MISSING cronie"
+fi
+
+if [ -n "$MISSING" ]; then
+    log_blue "需要安装依赖:$MISSING"
+    if command -v apt >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y $MISSING
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y $MISSING
+    else
+        log_red "未知系统，请手动安装:$MISSING"
+        exit 1
+    fi
+fi
+
+# 启动cron服务
+if command -v crond >/dev/null 2>&1; then
+    systemctl enable crond; systemctl start crond
+elif command -v cron >/dev/null 2>&1; then
+    systemctl enable cron; systemctl start cron
 else
-    echo "$(date): Failed to update - Zone or Record ID not found"
+    log_red "计划任务服务(crond/cron)不可用，请手动安装/启动！"
+    exit 1
 fi
-EOF
-    chmod +x /root/cf-v4-ddns.sh
-    print_success "本地脚本创建成功"
+
+log_green "依赖与计划任务服务 检查通过"
+
+log_green "\n【2/7】检测公网IP..."
+# AWS元数据优先，（169.254.169.254），否则多接口获取
+getip4() {
+    for u in \
+        "http://169.254.169.254/latest/meta-data/public-ipv4" \
+        "https://api-ipv4.ip.sb/ip" \
+        "https://ipv4.icanhazip.com" \
+        "http://api.ipify.org" \
+        "http://ifconfig.me"
+    do
+        ip=$(curl -s --max-time 6 "$u" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+        [ -n "$ip" ] && echo "$ip" && return 0
+    done
+    return 1
+}
+MAXWAIT=150
+INTERVAL=5
+timeout=0
+PUBIP=""
+while [ "$timeout" -le "$MAXWAIT" ]; do
+    PUBIP=$(getip4)
+    [ -n "$PUBIP" ] && break
+    sleep $INTERVAL
+    ((timeout += INTERVAL))
+done
+
+if [ -z "$PUBIP" ]; then
+    log_red "150秒内未获取到公网IP，请确保VPS出口畅通，有公网IP"
+    exit 1
+fi
+log_green "检测到公网出口IP: $PUBIP"
+
+log_green "\n【3/7】下载并装配Cloudflare DDNS主脚本"
+
+if [ -f "$DDNS_SH" ]; then
+    mv "$DDNS_SH" "$DDNS_SH.bak.$(date +%s)"
+fi
+wget -q -N --no-check-certificate https://raw.githubusercontent.com/yulewang/cloudflare-api-v4-ddns/master/cf-v4-ddns.sh -O "$DDNS_SH" || { log_red "脚本下载失败"; exit 1; }
+[ -f "$DDNS_SH" ] || { log_red "脚本未能落盘"; exit 1; }
+chmod +x "$DDNS_SH"
+apply_config_ddns_sh
+
+log_green "\n【4/7】首次同步DDNS..."
+bash "$DDNS_SH" || {
+    log_red "首次执行Cloudflare DDNS脚本失败，请检查CF密钥/域名是否正确及本机是否已绑定DNS记录。"
+    exit 1
 }
 
-# 测试脚本
-test_script() {
-    print_info "测试DDNS更新..."
-    
-    # 获取当前IP
-    CURRENT_IP=$(curl -s http://ipv4.icanhazip.com)
-    print_info "当前服务器IP: $CURRENT_IP"
-    
-    # 执行脚本
-    OUTPUT=$(/root/cf-v4-ddns.sh 2>&1)
-    
-    if echo "$OUTPUT" | grep -q -i "error\|failed"; then
-        print_warning "首次执行可能失败（DNS记录可能未创建）"
-        echo "$OUTPUT" | head -3
-    else
-        print_success "DDNS更新测试成功"
-    fi
-}
+log_green "\n【5/7】添加crontab定时同步任务..."
+crontab -l 2>/dev/null | grep -v "$CRON_MARK" | (cat; echo "*/1 * * * * $DDNS_SH >/dev/null 2>&1") | crontab -
 
-# 设置定时任务
-setup_cron() {
-    print_info "设置定时任务（每1分钟更新）..."
-    
-    # 删除旧的定时任务
-    crontab -l 2>/dev/null | grep -v "cf-v4-ddns.sh" | crontab - 2>/dev/null || true
-    
-    # 添加新的定时任务
-    (crontab -l 2>/dev/null; echo "$CRON_INTERVAL /root/cf-v4-ddns.sh >/dev/null 2>&1") | crontab -
-    
-    print_success "定时任务设置成功"
-}
+log_green "\n【6/7】添加定时自愈任务(守护DDNS计划存在)..."
+(crontab -l 2>/dev/null | grep -v "$0"; echo "*/5 * * * * grep -q '$CRON_MARK' <(crontab -l) || (crontab -l | grep -v '$CRON_MARK'; echo '*/1 * * * * $DDNS_SH >/dev/null 2>&1') | crontab -") | crontab -
 
-# 创建管理脚本
-create_management_script() {
-    print_info "创建管理工具..."
-    
-    cat > /usr/local/bin/ddns <<'EOF'
-#!/bin/bash
-
-case "$1" in
-    status)
-        echo "=== DDNS状态 ==="
-        echo "配置域名: hk01.cfcdndns.top"
-        echo "当前IP: $(curl -s http://ipv4.icanhazip.com)"
-        echo "定时任务:"
-        crontab -l | grep "cf-v4-ddns.sh" || echo "未设置"
-        ;;
-    update)
-        echo "手动更新DDNS..."
-        /root/cf-v4-ddns.sh
-        ;;
-    stop)
-        crontab -l | grep -v "cf-v4-ddns.sh" | crontab -
-        echo "DDNS自动更新已停止"
-        ;;
-    start)
-        (crontab -l 2>/dev/null; echo "*/1 * * * * /root/cf-v4-ddns.sh >/dev/null 2>&1") | crontab -
-        echo "DDNS自动更新已启动（每1分钟）"
-        ;;
-    *)
-        echo "用法: ddns {status|update|stop|start}"
-        ;;
-esac
-EOF
-    
-    chmod +x /usr/local/bin/ddns
-    print_success "管理工具创建成功"
-}
-
-# 最终检查
-final_check() {
-    print_info "执行最终检查..."
-    
-    # 检查脚本是否存在
-    if [[ -f /root/cf-v4-ddns.sh ]]; then
-        print_success "DDNS脚本已就绪"
-    else
-        print_error "DDNS脚本未找到"
-        exit 1
-    fi
-    
-    # 检查定时任务
-    if crontab -l 2>/dev/null | grep -q "cf-v4-ddns.sh"; then
-        print_success "定时任务已设置"
-    else
-        print_error "定时任务设置失败"
-    fi
-    
-    # 获取IP信息
-    CURRENT_IP=$(curl -s http://ipv4.icanhazip.com)
-    print_success "所有检查完成"
-}
-
-# 显示完成信息
-show_completion() {
-    echo ""
-    echo -e "${GREEN}================================================"
-    echo -e "         DDNS 部署完成！"
-    echo -e "================================================${NC}"
-    echo ""
-    echo -e "${BLUE}配置信息：${NC}"
-    echo "  域名: $CFRECORD_NAME"
-    echo "  更新频率: 每1分钟"
-    echo "  脚本位置: /root/cf-v4-ddns.sh"
-    echo ""
-    echo -e "${BLUE}管理命令：${NC}"
-    echo "  ddns status  - 查看状态"
-    echo "  ddns update  - 手动更新"
-    echo "  ddns stop    - 停止自动更新"
-    echo "  ddns start   - 启动自动更新"
-    echo ""
-    echo -e "${YELLOW}注意事项：${NC}"
-    echo "  1. 请确保Cloudflare已创建 $CFRECORD_NAME 的A记录"
-    echo "  2. 请确保DNS代理状态为关闭（灰色云朵）"
-    echo ""
-    CURRENT_IP=$(curl -s http://ipv4.icanhazip.com)
-    echo -e "${GREEN}当前IP: $CURRENT_IP${NC}"
-    echo ""
-}
-
-# 主函数 - 全自动执行
-main() {
-    show_banner
-    
-    # 自动执行所有步骤
-    check_root
-    check_system
-    install_dependencies
-    setup_ddns_script
-    test_script
-    setup_cron
-    create_management_script
-    final_check
-    show_completion
-    
-    print_success "全部完成！DDNS已开始自动更新。"
-}
-
-# 执行主函数
-main
+log_green "\n【7/7】安装完毕！"
+echo -e "Cloudflare DDNS自动装机完毕，公网IP已同步。\n如需维护请再次运行本脚本进入菜单。\n日志：$LOGF"
+log_green "============================================="
+exit 0
